@@ -73,6 +73,8 @@ class MainAppLogic(QObject):
 
         self.source_files: List[str] = [] # Holds both files and folders
         self.file_to_folder_map: Dict[str, Optional[str]] = {} # 记录文件来自哪个文件夹
+        self.excluded_paths: List[str] = [] # 排除的文件和文件夹路径
+        self.excluded_dirs: set = set() # 记录被排除的文件夹路径（用于快速查找）
 
         self.app_config = AppConfig()
         self.logger.info("主页面应用业务逻辑初始化完成")
@@ -741,8 +743,11 @@ class MainAppLogic(QObject):
         self.add_folder()
 
     def remove_file(self, file_path: str):
+        print(f"[DEBUG app_logic] remove_file called: {file_path}")
         try:
             norm_file_path = os.path.normpath(file_path)
+            print(f"[DEBUG app_logic] norm_file_path: {norm_file_path}")
+            print(f"[DEBUG app_logic] In source_files: {norm_file_path in self.source_files}")
             
             # 情况1：直接在 source_files 中（文件夹或单独添加的文件）
             if norm_file_path in self.source_files:
@@ -822,6 +827,49 @@ class MainAppLogic(QObject):
                     self.file_removed.emit(file_path)
                     return
             
+            # 情况4：子文件夹或子文件（在某个父文件夹内）
+            # 检查是否在某个父文件夹内
+            parent_folder = None
+            print(f"[DEBUG app_logic] Checking if {norm_file_path} is in any parent folder")
+            print(f"[DEBUG app_logic] source_files: {self.source_files}")
+            for folder in self.source_files:
+                if os.path.isdir(folder):
+                    try:
+                        # 使用字符串比较来判断是否是子路径
+                        norm_folder = os.path.normpath(folder)
+                        print(f"[DEBUG app_logic] Comparing with folder: {norm_folder}")
+                        # 检查 norm_file_path 是否以 norm_folder 开头
+                        if norm_file_path.startswith(norm_folder + os.sep) or \
+                           (norm_file_path.startswith(norm_folder) and len(norm_file_path) > len(norm_folder)):
+                            parent_folder = folder
+                            print(f"[DEBUG app_logic] Found parent folder: {parent_folder}")
+                            break
+                    except Exception as e:
+                        print(f"[DEBUG app_logic] Error checking parent folder: {e}")
+                        continue
+            
+            if parent_folder:
+                # 这是父文件夹内的子项，添加到排除列表并发出信号让UI删除
+                if norm_file_path not in self.excluded_paths:
+                    self.excluded_paths.append(norm_file_path)
+                    # 如果是目录，也添加到excluded_dirs
+                    if os.path.isdir(norm_file_path):
+                        self.excluded_dirs.add(norm_file_path)
+                self.file_removed.emit(file_path)
+                self.logger.info(f"Removed item from UI and added to exclusion: {file_path} (parent folder: {parent_folder})")
+                return
+            
+            # 情况5：如果是目录但不在source_files中，可能是UI中的子文件夹
+            # 添加到排除列表并发出信号让UI删除
+            if os.path.isdir(norm_file_path):
+                print(f"[DEBUG app_logic] Directory not in source_files, adding to exclusion list")
+                if norm_file_path not in self.excluded_paths:
+                    self.excluded_paths.append(norm_file_path)
+                    self.excluded_dirs.add(norm_file_path)
+                self.file_removed.emit(file_path)
+                self.logger.info(f"Removed directory from UI and added to exclusion: {file_path}")
+                return
+            
             # 如果到这里还没有处理，说明路径不存在
             self.logger.warning(f"Path not found in list for removal: {file_path}")
         except Exception as e:
@@ -833,6 +881,8 @@ class MainAppLogic(QObject):
         # TODO: Add confirmation dialog
         self.source_files.clear()
         self.file_to_folder_map.clear()  # 清空文件夹映射
+        self.excluded_paths.clear()  # 清空排除列表
+        self.excluded_dirs.clear()  # 清空排除的文件夹集合
         self.files_cleared.emit()
         self.logger.info("File list cleared by user.")
     # endregion
@@ -844,6 +894,9 @@ class MainAppLogic(QObject):
         同时记录文件和文件夹的映射关系。
         按文件夹分组排序：先对文件夹进行排序，然后对每个文件夹内的图片排序。
         """
+        self.logger.info(f"[DEBUG] _resolve_input_files called, source_files count: {len(self.source_files)}")
+        self.logger.info(f"[DEBUG] excluded_paths count: {len(self.excluded_paths)}")
+        self.logger.info(f"[DEBUG] excluded_dirs count: {len(self.excluded_dirs)}")
         resolved_files = []
         # 保存旧的映射，用于处理删除文件后的情况
         old_map = self.file_to_folder_map.copy()
@@ -863,13 +916,44 @@ class MainAppLogic(QObject):
         # 对文件夹进行自然排序
         folders.sort(key=self.file_service._natural_sort_key)
         
+        # 重建excluded_dirs（兼容旧数据）
+        if not self.excluded_dirs and self.excluded_paths:
+            self.logger.info(f"[DEBUG] Rebuilding excluded_dirs from excluded_paths")
+            for path in self.excluded_paths:
+                if os.path.isdir(path):
+                    self.excluded_dirs.add(os.path.normpath(path))
+                    self.logger.info(f"[DEBUG] Added to excluded_dirs: {path}")
+        
         # 按文件夹分组处理
         for folder in folders:
             # 获取文件夹中的所有图片（已经使用自然排序）
             folder_files = self.file_service.get_image_files_from_folder(folder, recursive=True)
-            resolved_files.extend(folder_files)
-            # 记录这些文件来自这个文件夹
+            self.logger.info(f"[DEBUG] Folder: {folder}, Total files: {len(folder_files)}")
+            self.logger.info(f"[DEBUG] Excluded paths count: {len(self.excluded_paths)}")
+            self.logger.info(f"[DEBUG] Excluded dirs count: {len(self.excluded_dirs)}")
+            
+            # 过滤掉排除列表中的文件和文件夹
+            filtered_files = []
             for file_path in folder_files:
+                norm_file_path = os.path.normpath(file_path)
+                # 检查文件本身是否被排除
+                if norm_file_path in self.excluded_paths:
+                    self.logger.info(f"[DEBUG] File excluded (direct match): {norm_file_path}")
+                    continue
+                # 检查文件是否在被排除的文件夹内
+                is_excluded = False
+                for excluded_dir in self.excluded_dirs:
+                    if norm_file_path.startswith(excluded_dir + os.sep):
+                        is_excluded = True
+                        self.logger.info(f"[DEBUG] File excluded (in excluded dir {excluded_dir}): {norm_file_path}")
+                        break
+                if not is_excluded:
+                    filtered_files.append(file_path)
+            
+            self.logger.info(f"[DEBUG] After filtering: {len(filtered_files)} files")
+            resolved_files.extend(filtered_files)
+            # 记录这些文件来自这个文件夹
+            for file_path in filtered_files:
                 self.file_to_folder_map[file_path] = folder
         
         # 处理单独添加的文件（使用自然排序）

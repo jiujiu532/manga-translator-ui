@@ -289,74 +289,110 @@ class FileListView(QTreeWidget):
 
     def add_files(self, file_paths: List[str]):
         """添加多个文件/文件夹到列表"""
-        # 按文件夹分组
-        folder_groups: Dict[str, List[str]] = {}
-        standalone_files: List[str] = []
-        
         for path in file_paths:
             norm_path = os.path.normpath(path)
             
             if os.path.isdir(norm_path):
-                # 如果传入的是文件夹路径，递归扫描其中的所有图片（包括子文件夹）
-                try:
-                    image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
-                    files = []
-                    
-                    # 递归遍历文件夹及其子文件夹，按子文件夹顺序排序
-                    for root, dirs, filenames in os.walk(norm_path):
-                        # 忽略 manga_translator_work 目录
-                        if 'manga_translator_work' in dirs:
-                            dirs.remove('manga_translator_work')
-                        
-                        # 对子文件夹进行自然排序，确保按正确顺序遍历
-                        dirs.sort(key=natural_sort_key)
-                        
-                        # 收集当前目录的图片并排序
-                        current_files = []
-                        for f in filenames:
-                            if os.path.splitext(f)[1].lower() in image_extensions:
-                                current_files.append(os.path.join(root, f))
-                        
-                        # 对当前目录的文件进行自然排序后添加
-                        current_files.sort(key=natural_sort_key)
-                        files.extend(current_files)
-                    
-                    if files:
-                        folder_groups[norm_path] = files
-                except Exception as e:
-                    print(f"Error loading files from folder {norm_path}: {e}")
+                # 如果传入的是文件夹路径，创建树形结构
+                self._add_folder_tree(norm_path)
             else:
-                # 检查文件是否已存在
-                file_dir = os.path.dirname(norm_path)
+                # 单个文件
+                self._add_single_file(norm_path)
+    
+    def _add_folder_tree(self, folder_path: str):
+        """添加文件夹及其完整的树形结构"""
+        if folder_path in self.folder_nodes:
+            return  # 文件夹已存在
+        
+        # 创建顶层文件夹节点
+        folder_item = QTreeWidgetItem(self)
+        folder_item.setData(0, Qt.ItemDataRole.UserRole, folder_path)
+        
+        # 创建文件夹项的自定义控件
+        folder_widget = FileItemWidget(folder_path, is_folder=True)
+        folder_widget.remove_requested.connect(self.file_remove_requested.emit)
+        
+        self.addTopLevelItem(folder_item)
+        self.setItemWidget(folder_item, 0, folder_widget)
+        
+        # 保存文件夹节点
+        self.folder_nodes[folder_path] = folder_item
+        
+        # 递归添加子文件夹和文件
+        self._populate_folder_tree(folder_item, folder_path)
+        
+        # 更新文件数量显示
+        file_count = self._count_files_recursive(folder_path)
+        folder_widget.update_file_count(file_count)
+    
+    def _count_files_recursive(self, folder_path: str) -> int:
+        """递归统计文件夹中的图片文件数量"""
+        if not os.path.isdir(folder_path):
+            return 0
+        try:
+            image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
+            count = 0
+            for root, dirs, files in os.walk(folder_path):
+                for filename in files:
+                    if os.path.splitext(filename)[1].lower() in image_extensions:
+                        count += 1
+            return count
+        except:
+            return 0
+    
+    def _populate_folder_tree(self, parent_item: QTreeWidgetItem, folder_path: str):
+        """递归填充文件夹树形结构"""
+        try:
+            image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
+            
+            # 获取当前文件夹的直接子项
+            items = os.listdir(folder_path)
+            
+            # 分离文件夹和文件
+            subdirs = []
+            files = []
+            
+            for item in items:
+                item_path = os.path.join(folder_path, item)
+                if os.path.isdir(item_path):
+                    subdirs.append(item_path)
+                elif os.path.splitext(item)[1].lower() in image_extensions:
+                    files.append(item_path)
+            
+            # 先添加子文件夹
+            for subdir in sorted(subdirs, key=natural_sort_key):
+                subdir_item = QTreeWidgetItem(parent_item)
+                subdir_item.setData(0, Qt.ItemDataRole.UserRole, subdir)
                 
-                # 如果文件的父目录已经在分组中，添加到该分组
-                if file_dir in folder_groups:
-                    if norm_path not in folder_groups[file_dir]:
-                        folder_groups[file_dir].append(norm_path)
-                else:
-                    # 检查是否有其他文件来自同一目录
-                    found_group = False
-                    for existing_file in file_paths:
-                        if existing_file != path and os.path.dirname(os.path.normpath(existing_file)) == file_dir:
-                            # 找到同目录的文件，创建分组
-                            if file_dir not in folder_groups:
-                                folder_groups[file_dir] = []
-                            if norm_path not in folder_groups[file_dir]:
-                                folder_groups[file_dir].append(norm_path)
-                            found_group = True
-                            break
-                    
-                    if not found_group:
-                        # 独立文件
-                        standalone_files.append(norm_path)
-        
-        # 添加文件夹分组
-        for folder_path, files in folder_groups.items():
-            self._add_folder_group(folder_path, files)
-        
-        # 添加独立文件
-        for file_path in standalone_files:
-            self._add_single_file(file_path)
+                subdir_widget = FileItemWidget(subdir, is_folder=True)
+                subdir_widget.remove_requested.connect(self.file_remove_requested.emit)
+                
+                parent_item.addChild(subdir_item)
+                self.setItemWidget(subdir_item, 0, subdir_widget)
+                
+                # 保存子文件夹节点
+                self.folder_nodes[subdir] = subdir_item
+                
+                # 递归处理子文件夹
+                self._populate_folder_tree(subdir_item, subdir)
+                
+                # 更新子文件夹的文件数量显示
+                file_count = self._count_files_recursive(subdir)
+                subdir_widget.update_file_count(file_count)
+            
+            # 再添加文件
+            for file_path in sorted(files, key=natural_sort_key):
+                file_item = QTreeWidgetItem(parent_item)
+                file_item.setData(0, Qt.ItemDataRole.UserRole, file_path)
+                
+                file_widget = FileItemWidget(file_path, is_folder=False)
+                file_widget.remove_requested.connect(self.file_remove_requested.emit)
+                
+                parent_item.addChild(file_item)
+                self.setItemWidget(file_item, 0, file_widget)
+                
+        except Exception as e:
+            print(f"Error populating folder tree for {folder_path}: {e}")
         
         # 触发重绘以隐藏占位提示
         self.viewport().update()
@@ -380,31 +416,16 @@ class FileListView(QTreeWidget):
         # 保存文件夹节点
         self.folder_nodes[folder_path] = folder_item
         
-        # 递归添加文件夹中的所有文件（包括子文件夹），按子文件夹顺序排序
+        # 添加文件夹中的文件
         try:
             image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
-            files = []
+            files = [
+                os.path.join(folder_path, f)
+                for f in os.listdir(folder_path)
+                if os.path.splitext(f)[1].lower() in image_extensions
+            ]
             
-            # 递归遍历文件夹及其子文件夹，按子文件夹顺序排序
-            for root, dirs, filenames in os.walk(folder_path):
-                # 忽略 manga_translator_work 目录
-                if 'manga_translator_work' in dirs:
-                    dirs.remove('manga_translator_work')
-                
-                # 对子文件夹进行自然排序，确保按正确顺序遍历
-                dirs.sort(key=natural_sort_key)
-                
-                # 收集当前目录的图片并排序
-                current_files = []
-                for f in filenames:
-                    if os.path.splitext(f)[1].lower() in image_extensions:
-                        current_files.append(os.path.join(root, f))
-                
-                # 对当前目录的文件进行自然排序后添加
-                current_files.sort(key=natural_sort_key)
-                files.extend(current_files)
-            
-            for file_path in files:
+            for file_path in sorted(files, key=natural_sort_key):
                 self._add_file_to_folder(file_path, folder_item)
             
             # 更新文件夹显示的文件数
@@ -444,8 +465,8 @@ class FileListView(QTreeWidget):
         # 保存文件夹节点
         self.folder_nodes[folder_path] = folder_item
         
-        # 添加文件列表（保持传入的顺序，已经按子文件夹排序好了）
-        for file_path in files:
+        # 添加文件列表
+        for file_path in sorted(files, key=natural_sort_key):
             self._add_file_to_folder(file_path, folder_item)
         
         # 更新文件夹显示的文件数
@@ -482,67 +503,117 @@ class FileListView(QTreeWidget):
     def remove_file(self, file_path: str):
         """移除指定文件或文件夹"""
         norm_path = os.path.normpath(file_path)
+        print(f"[DEBUG] remove_file called: {norm_path}")
+        print(f"[DEBUG] Is directory: {os.path.isdir(norm_path)}")
+        print(f"[DEBUG] In folder_nodes: {norm_path in self.folder_nodes}")
         
         # 临时断开选择信号，避免删除时触发选择事件
-        self.itemSelectionChanged.disconnect(self._on_selection_changed)
+        try:
+            self.itemSelectionChanged.disconnect(self._on_selection_changed)
+        except:
+            pass
         
         try:
-            # 如果是文件夹
-            if norm_path in self.folder_nodes:
-                # 移除文件夹节点
-                folder_item = self.folder_nodes[norm_path]
-                index = self.indexOfTopLevelItem(folder_item)
-                if index >= 0:
-                    self.takeTopLevelItem(index)
-                del self.folder_nodes[norm_path]
-                return
-            
-            # 如果是文件，查找并移除
-            def find_and_remove(parent_item: Optional[QTreeWidgetItem] = None):
+            # 递归查找并移除项
+            def find_and_remove_item(parent_item: Optional[QTreeWidgetItem] = None) -> tuple[bool, Optional[QTreeWidgetItem]]:
                 if parent_item is None:
                     # 搜索顶层项
                     for i in range(self.topLevelItemCount()):
                         item = self.topLevelItem(i)
-                        if item.data(0, Qt.ItemDataRole.UserRole) == norm_path:
+                        item_path = item.data(0, Qt.ItemDataRole.UserRole)
+                        
+                        if item_path == norm_path:
+                            # 找到了，删除这个顶层项
+                            print(f"[DEBUG] Found and removing top-level item: {item_path}")
                             self.takeTopLevelItem(i)
+                            # 如果是文件夹，从folder_nodes中移除
+                            if norm_path in self.folder_nodes:
+                                del self.folder_nodes[norm_path]
+                            # 递归删除所有子文件夹的引用
+                            self._remove_folder_nodes_recursive(item)
+                            print(f"[DEBUG] Successfully removed top-level item: {norm_path}")
                             return True, None
+                        
                         # 递归搜索子项
-                        result, parent = find_and_remove(item)
+                        result, parent = find_and_remove_item(item)
                         if result:
                             return True, parent
+                    
+                    return False, None
                 else:
                     # 搜索子项
                     for i in range(parent_item.childCount()):
                         child = parent_item.child(i)
-                        if child.data(0, Qt.ItemDataRole.UserRole) == norm_path:
+                        child_path = child.data(0, Qt.ItemDataRole.UserRole)
+                        
+                        if child_path == norm_path:
+                            # 找到了，删除这个子项
+                            print(f"[DEBUG] Found and removing child: {child_path}")
                             parent_item.removeChild(child)
-                            # 检查父文件夹是否还有子项
-                            if parent_item.childCount() == 0:
-                                # 文件夹为空，移除文件夹节点
-                                folder_path = parent_item.data(0, Qt.ItemDataRole.UserRole)
-                                if folder_path in self.folder_nodes:
-                                    del self.folder_nodes[folder_path]
-                                index = self.indexOfTopLevelItem(parent_item)
-                                if index >= 0:
-                                    self.takeTopLevelItem(index)
-                            else:
-                                # 文件夹还有子项，更新文件数显示
-                                self._update_folder_count(parent_item)
+                            # 如果是文件夹，从folder_nodes中移除
+                            if norm_path in self.folder_nodes:
+                                del self.folder_nodes[norm_path]
+                            # 递归删除所有子文件夹的引用
+                            self._remove_folder_nodes_recursive(child)
+                            # 递归向上更新所有父文件夹的文件数量
+                            self._update_all_parent_counts(parent_item)
+                            print(f"[DEBUG] Successfully removed: {norm_path}")
                             return True, parent_item
-                return False, None
+                        
+                        # 递归搜索更深层的子项
+                        result, parent = find_and_remove_item(child)
+                        if result:
+                            return True, parent
+                    
+                    return False, None
             
-            find_and_remove()
+            find_and_remove_item()
         finally:
             # 重新连接选择信号
-            self.itemSelectionChanged.connect(self._on_selection_changed)
+            try:
+                self.itemSelectionChanged.connect(self._on_selection_changed)
+            except:
+                pass
+    
+    def _remove_folder_nodes_recursive(self, item: QTreeWidgetItem):
+        """递归移除文件夹节点的所有子文件夹引用"""
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child_path = child.data(0, Qt.ItemDataRole.UserRole)
+            if child_path in self.folder_nodes:
+                del self.folder_nodes[child_path]
+            # 递归处理子项
+            self._remove_folder_nodes_recursive(child)
 
     def _update_folder_count(self, folder_item: QTreeWidgetItem):
-        """更新文件夹显示的文件数量"""
+        """更新文件夹显示的文件数量（递归统计）"""
         if folder_item:
             widget = self.itemWidget(folder_item, 0)
             if isinstance(widget, FileItemWidget) and widget.is_folder:
-                count = folder_item.childCount()
+                # 递归统计所有文件数量
+                count = self._count_files_in_tree(folder_item)
                 widget.update_file_count(count)
+                print(f"[DEBUG] Updated folder count: {folder_item.data(0, Qt.ItemDataRole.UserRole)} = {count}")
+    
+    def _update_all_parent_counts(self, item: QTreeWidgetItem):
+        """递归向上更新所有父文件夹的文件数量"""
+        current = item
+        while current:
+            self._update_folder_count(current)
+            current = current.parent()
+    
+    def _count_files_in_tree(self, tree_item: QTreeWidgetItem) -> int:
+        """递归统计树节点中的文件数量"""
+        count = 0
+        for i in range(tree_item.childCount()):
+            child = tree_item.child(i)
+            child_path = child.data(0, Qt.ItemDataRole.UserRole)
+            if child_path and os.path.isfile(child_path):
+                count += 1
+            elif child_path and os.path.isdir(child_path):
+                # 递归统计子文件夹
+                count += self._count_files_in_tree(child)
+        return count
 
     def clear(self, clear_cache: bool = False):
         """
